@@ -1,0 +1,73 @@
+curl -XGET 'http://localhost:9200/allmarts/mainapp_product/_search?pretty' -d '
+{
+    "fields" : ["title", "title.raw", "retail_price"],
+    "sort": [
+        {"title.raw": "desc"}
+    ],
+    "query": {
+        "query_string": {
+            "query": "apple"
+        },
+        "analyze_wildcard": true
+    }
+}'
+
+
+curl -XGET 'http://localhost:9200/allmarts/mainapp_product/_search?pretty' -d '
+{
+    "fields" : ["title", "retail_price", "shop"],
+    "query": {
+        "filtered": {
+            "query": {
+                "query_string": {
+                    "query": "apple"
+                }
+            },
+            "filter": {
+                "term": {"retail_price": 31500}
+            }
+        },
+        "analyze_wildcard": true
+    }
+}'
+
+curl -XGET 'http://localhost:9200/allmarts/mainapp_product/_search?pretty' -d '
+{
+    "fields" : ["title", "retail_price", "shop"],
+    "query": {
+        "filtered": {
+            "query": {
+                "query_string": {
+                    "query": "apple"
+                }
+            },
+            "filter": {
+                "range" : {
+                    "retail_price" : {
+                        "gte": 24000,
+                        "lte": 25000
+                    }
+                }
+            }
+        },
+        "analyze_wildcard": true
+    }
+}'
+
+curl -XGET 'http://localhost:9200/allmarts/mainapp_product/_search?pretty' -d '
+{
+    "fields" : ["title", "retail_price", "shop"],
+    "query": {
+        "filtered": {
+            "query": {
+                "query_string": {
+                    "query": "apple"
+                }
+            },
+            "filter": {
+                "term": {"title": "4s"}
+            }
+        },
+        "analyze_wildcard": true
+    }
+}'
