@@ -259,12 +259,42 @@ class SearchQuerySetOld(object):
 
 
 class SearchQuerySet(object):
+    # TODO: filter
 
-    def __init__(self, query, schema):
-        self.query = query
-        self.schema = schema
-        self.sort = None
-        self.cache = None
+    def __init__(self, query, schema, limit, page):
+        """
+        Basic initial
+
+        :param query: search query
+        :type query: string
+
+        :param schema: search schema
+        :type schema: subclass of SearchSchemaBase
+
+        :param limit: number of items of one page
+        :type limit: positive int
+
+        :param page: page number
+        :type page: positive int
+        """
+        self.__query = query
+        self.__schema = schema
+        self._cache = None
+        self.__size = int(limit)
+        self.__from = (int(page)-1) * self.__size
+        # query options such as limit, page, sort, etc...
+        self.opts = {
+            'count': 0
+        }
+
+    #####################
+    #  PRIVATE METHODS  #
+    #####################
+
+    def __clone(self):
+        obj = self.__class__(self.__query, self.__schema)
+        obj.opts = self.opts.copy()
+        return obj
 
     def __get_query(self):
         p = {
@@ -276,9 +306,9 @@ class SearchQuerySet(object):
                 '_source': False
             }
         }
-        if self.sort is not None:
+        if self.opts.get('sort', False):
             p['sort'] = []
-            for field_name in self.sort:
+            for field_name in self.opts.['sort']:
                 desc = False
                 if field_name[0] == '-':
                     desc = True
@@ -296,23 +326,61 @@ class SearchQuerySet(object):
         return p
 
     def __get_host(self):
-        return self.schema.get_host()
+        return self.__schema.get_host()
 
     def __get_index(self):
-        return self.schema.get_index()
+        return self.__schema.get_index()
 
     def __get_type(self):
-        return self.schema.get_type()
+        return self.__schema.get_type()
 
     def __get_url(self):
-        url = u'http://%s/%s/%s/_search' % (self.__get_host(), self.__get_index(), 
-                                            self.__get_type())
-        if self.__size and self.__page:
-            url += '?size=%d,from=%d' % (self.__size, (self.__page-1) * self.__size)
-        return url
+        ptrn = (self.__get_host(), self.__get_index(), self.__get_type(), self.__size, self.__from)
+        return u'http://%s/%s/%s/_search?size=%d,from=%d' % ptrn
+
+    def __fill_cache(self):
+        url = self.__get_url()
+        query = cls.__get_query()
+        response = requests.post(url, data=json.dumps(query))
+        jsn = response.json()
+        self.opts['count'] = jsn['hits']['total']
+        hits = jsn["hits"]["hits"]
+        self.opts['score'] = {hit['_id']: hit['_score'] for hit in hits}
+        self._cache = self.__schema.model.objects.filter(pk__in=self.opts['score'].keys())
+        if self.opts.get('sort', False):
+            self._cache = self._cache.order_by(self.opts.['sort'])
+
+    ###################
+    #  CHAIN METHODS  #
+    ###################
 
     def order_by(self, *args):
-        self.sort = args
+        # TODO: multifields sort with _score
+        """
+        Works like Django order_by. Allow to pass _score, but only as single parameter.
+        """
+        if self._cache is not None:
+            obj = self.__clone()
+            obj.opts.['sort'] = args
+            obj._cache = self._cache.order_by(*args)
+            return obj
+        self.opts.['sort'] = args
+        return self
+
+    ####################
+    #  LIST EMULATION  #
+    ####################
+
+    def __repr__(self):
+        if self.__cache is None:
+            self.__fill_cache()
+        # data = list(self[:REPR_OUTPUT_SIZE + 1])
+        # if len(data) > REPR_OUTPUT_SIZE:
+        #     data[-1] = "...(remaining elements truncated)..."
+        # return repr(data)
+
+    def __len__(self):
+        return self.opts['count']
 
 
 class QueryStringMixin(object):
