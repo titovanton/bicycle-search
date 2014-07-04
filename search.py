@@ -7,6 +7,7 @@ from itertools import chain
 
 import requests
 from django.conf import settings
+from django.utils import six
 
 from fields import BaseField
 from fields import StringField
@@ -48,8 +49,309 @@ INDEX_PATTERN = {
 }
 
 
-class SearchSchemaBase(object):
+class SearchQuerySetOld(object):
+    """
+    Works like a Django query_set
+    """
+    @classmethod
+    def instance(cls, response, model, order):
+        """
+        Get instance SearchQuerySet from response object and model class object
+        """
+        hits = response.json()["hits"]["hits"]
+        assert False
+        ids = {hit['_id']: hit['_score'] for hit in hits}
+        qs = model.objects.filter(pk__in=ids.keys())
+        return cls(ids, qs)
 
+    def __init__(self, ids, qs):
+        self.__ids = ids
+        self.__qs = qs
+
+    def scored(self, asc=False):
+        """
+        return list of qs objects sorted by score from highest to lowest
+
+        :param asc: from lowest to highest, defaults to False
+        :type asc: bool
+        """
+        reverse = not asc
+        object_list = sorted(chain(self.__qs), reverse=reverse,
+                             key=lambda obj: self.__ids[str(obj.pk)])
+        return object_list
+
+    class __MethodWrapper(object):
+
+        def __init__(self, name, qs, ids, klass):
+            methods = dict(inspect.getmembers(qs.__class__, inspect.ismethod))
+            if name in methods:
+                self.__method = methods[name]
+                self.__qs = qs
+                self.__ids = ids
+                self.__klass = klass
+            else:
+                msg = '%s has not %s method' % (qs.__class__, name)
+                raise AttributeError(msg)
+
+        def __call__(self, *args, **kwargs):
+            qs = self.__method(self.__qs, *args, **kwargs)
+            return self.__klass(self.__ids, qs)
+
+    def __getattribute__(self, name):
+        # hardcode
+        # unfortunately a special methods like __len__ cannot be reloaded like bellow
+        # this is a python speed price
+        query_set_attrs = ('all', 'filter', 'exclude', 'order_by', 'distinct', 'aggregate',
+                           'annotate', 'extra',)
+        if name in query_set_attrs:
+            return self.__MethodWrapper(name, self.__qs, self.__ids, self.__class__)
+        else:
+            return super(SearchQuerySet, self).__getattribute__(name)
+
+    def __deepcopy__(self, memo):
+        return self.__qs.__deepcopy__(memo)
+
+    def __getstate__(self):
+        return self.__qs.__getstate__()
+
+    def __setstate__(self, state):
+        return self.__qs.__setstate__(state)
+
+    def __reduce__(self):
+        return self.__qs.__reduce__()
+
+    def __repr__(self):
+        return self.__qs.__repr__()
+
+    def __len__(self):
+        return self.__qs.__len__()
+
+    def __iter__(self):
+        return self.__qs.__iter__()
+
+    def __nonzero__(self):
+        return self.__qs.__nonzero__()
+
+    def __getitem__(self, key):
+        return self.__qs.__getitem__(key)
+
+    def __and__(self, other):
+        return self.__qs.__and__(other)
+
+    def __or__(self, other):
+        return self.__qs.__or__(other)
+
+
+class SearchQuerySet(object):
+    # TODO: filter
+    """
+    Search query set in Django style
+    """
+
+    def __init__(self, query, schema):
+        """
+        Basic initial
+
+        :param query: search query
+        :type query: string
+
+        :param schema: search schema
+        :type schema: subclass of SearchSchemaBase
+        """
+        self.__count = None
+        self.__query = query
+        self.__schema = schema
+        self.__cache = None
+        # query options such as limit, page, sort, etc...
+        self.opts = {}
+
+    #####################
+    #  PRIVATE METHODS  #
+    #####################
+
+    # depends on opts
+    def __get_query(self, count=False):
+        """
+        Generate query data for ElasticSearch request
+
+        .. note::
+            ElasticSearch API does not support counting while sorting, that's why we needs
+            in count flag
+
+        :param count: flag, defaults to False
+        :type count: bool
+        """
+        p = {
+            'query': {
+                'query_string': {
+                    'query': self.__query
+                }, 
+                'analyze_wildcard': True,
+                '_source': False
+            }
+        }
+        if self.opts.get('sort', False) and not count:
+            p['sort'] = []
+            for field_name in self.opts['sort']:
+                desc = False
+                if field_name[0] == '-':
+                    desc = True
+                    field_name = field_name[1:]
+                if field_name == '_score':
+                    desc = not desc
+                if field_name != '_score':
+                    field = self.__schema.get_field(field_name)
+                    if field is not None:
+                        field_name = field.sort_mapping(field_name)
+                    else:
+                        field_name = None
+                if field_name is not None:
+                    p['sort'] += [{field_name: desc and 'desc' or 'asc'}]
+        return p
+
+    # depends on opts
+    def __fill_cache(self):
+        url = self.__get_url()
+        query = self.__get_query()
+        response = requests.post(url, data=json.dumps(query))
+        jsn = response.json()
+        hits = jsn["hits"]["hits"]
+        self.__count = int(jsn['hits']['total'])
+        self.opts['score'] = {hit['_id']: hit['_score'] for hit in hits}
+        self.__cache = self.__schema.model.objects.filter(pk__in=self.opts['score'].keys())
+        if self.opts.get('sort', False):
+            if '_score' not in self.opts['sort'] and '-_score' not in self.opts['sort']:
+                self.__cache = self.__cache.order_by(*self.opts['sort'])
+            else:
+                self.__scored()
+
+    def __clone(self):
+        obj = self.__class__(self.__query, self.__schema)
+        obj.opts = self.opts.copy()
+        return obj
+
+    # depends on opts
+    def __len(self):
+        if self.opts.get('slice', False):
+            return self.__get_size()
+        ptrn = (self.__get_host(), self.__get_index(), self.__get_type())
+        url = u'http://%s/%s/%s/_count' % ptrn
+        query = self.__get_query(True)
+        response = requests.post(url, data=json.dumps(query))
+        jsn = response.json()
+        return int(jsn['count'])
+
+    def __get_host(self):
+        return self.__schema.get_host()
+
+    def __get_index(self):
+        return self.__schema.get_index()
+
+    def __get_type(self):
+        return self.__schema.get_type()
+
+    def __get_from(self):
+        if self.opts.get('slice', False):
+            return self.opts['slice'].start
+        else:
+            return 0
+
+    def __get_size(self):
+        if self.opts.get('slice', False):
+            start = self.__get_from()
+            stop = self.opts['slice'].stop
+            return stop - start
+        else:
+            return self.__len__()
+
+    def __get_url(self):
+        ptrn = (self.__get_host(), self.__get_index(), self.__get_type(), 
+                self.__get_size(), self.__get_from())
+        return u'http://%s/%s/%s/_search?size=%d&from=%d' % ptrn
+
+    ###################
+    #  CHAIN METHODS  #
+    ###################
+
+    def order_by(self, *args):
+        # TODO: multifields sort with _score
+        # TODO: lookups
+        """
+        Works like Django order_by.
+
+        :param args: schema(model) ordered fields
+        :type args: unpacked list of unnamed strings
+
+
+        - You can pass order parameter with minus as first character, in Django style
+        and expect reverse ordering (DESC)
+        - You have to specify fields in SearchSchema, for witch you want to order, otherwise
+        first 10 items(default size of search result) will be ordered by score, not by field 
+        you want to.
+        """
+        obj = self.__clone()
+        obj.opts['sort'] = args
+        return obj
+
+    ####################
+    #  LIST EMULATION  #
+    ####################
+
+    def __repr__(self):
+        if self.__cache is None:
+            return u'<%sSearchQuerySet: [%d uncached item(s)]>' % (self.__schema.model.__name__,
+                                                                   self.__len__())
+        else:
+            return repr(self.__cache)
+
+    def __len__(self):
+        if self.__count is None:
+            self.__count = self.__len()
+        return self.__count
+
+    def __getitem__(self, k):
+        # TODO: slice step support
+        """
+        Retrieves an item or slice from the set of results.
+        """
+        if not isinstance(k, (slice,) + six.integer_types):
+            raise TypeError
+        assert ((not isinstance(k, slice) and (k >= 0)) or
+                (isinstance(k, slice) and (k.start is None or k.start >= 0) and
+                 (k.stop is None or k.stop >= 0))), \
+            "Negative indexing is not supported."
+        if isinstance(k, slice):
+            obj = self.__clone()
+            if k.start is not None:
+                start = int(k.start)
+            else:
+                start = 0
+            if k.step is not None:
+                step = int(k.step)
+            else:
+                step = 1
+            if k.stop is not None:
+                stop = int(k.stop)
+            else:
+                stop = self.__len__()
+            if start > self.__len__() or stop > self.__len__():
+                raise IndexError('slice out of list range')
+            obj.opts['slice'] = slice(start, stop, step)
+            return obj
+        else:
+            if k > self.__len__():
+                raise IndexError('list index out of range')
+            if self.__cache is None:
+                self.__fill_cache()
+            return self.__cache[k]
+
+    def __iter__(self):
+        if self.__cache is None:
+            self.__fill_cache()
+        return iter(self.__cache)
+
+
+class SearchSchemaBase(object):
     @classmethod
     def get_mappings(cls):
         properties = {key: value.data for key, value in cls.get_fields()}
@@ -164,287 +466,11 @@ class SearchSchemaBase(object):
         response = requests.delete(url)
 
 
-class SearchQuerySetOld(object):
-    """
-    Works like a Django query_set
-    """
-
-    @classmethod
-    def instance(cls, response, model, order):
-        """
-        Get instance SearchQuerySet from response object and model class object
-        """
-        hits = response.json()["hits"]["hits"]
-        assert False
-        ids = {hit['_id']: hit['_score'] for hit in hits}
-        qs = model.objects.filter(pk__in=ids.keys())
-        return cls(ids, qs)
-
-    def __init__(self, ids, qs):
-        self.__ids = ids
-        self.__qs = qs
-
-    def scored(self, asc=False):
-        """
-        return list of qs objects sorted by score from highest to lowest
-
-        :param asc: from lowest to highest, defaults to False
-        :type asc: bool
-        """
-        reverse = not asc
-        object_list = sorted(chain(self.__qs), reverse=reverse,
-                             key=lambda obj: self.__ids[str(obj.pk)])
-        return object_list
-
-    class __MethodWrapper(object):
-
-        def __init__(self, name, qs, ids, klass):
-            methods = dict(inspect.getmembers(qs.__class__, inspect.ismethod))
-            if name in methods:
-                self.__method = methods[name]
-                self.__qs = qs
-                self.__ids = ids
-                self.__klass = klass
-            else:
-                msg = '%s has not %s method' % (qs.__class__, name)
-                raise AttributeError(msg)
-
-        def __call__(self, *args, **kwargs):
-            qs = self.__method(self.__qs, *args, **kwargs)
-            return self.__klass(self.__ids, qs)
-
-    def __getattribute__(self, name):
-        # hardcode
-        # unfortunately a special methods like __len__ cannot be reloaded like bellow
-        # this is a python speed price
-        query_set_attrs = ('all', 'filter', 'exclude', 'order_by', 'distinct', 'aggregate',
-                           'annotate', 'extra',)
-        if name in query_set_attrs:
-            return self.__MethodWrapper(name, self.__qs, self.__ids, self.__class__)
-        else:
-            return super(SearchQuerySet, self).__getattribute__(name)
-
-    def __deepcopy__(self, memo):
-        return self.__qs.__deepcopy__(memo)
-
-    def __getstate__(self):
-        return self.__qs.__getstate__()
-
-    def __setstate__(self, state):
-        return self.__qs.__setstate__(state)
-
-    def __reduce__(self):
-        return self.__qs.__reduce__()
-
-    def __repr__(self):
-        return self.__qs.__repr__()
-
-    def __len__(self):
-        return self.__qs.__len__()
-
-    def __iter__(self):
-        return self.__qs.__iter__()
-
-    def __nonzero__(self):
-        return self.__qs.__nonzero__()
-
-    def __getitem__(self, key):
-        return self.__qs.__getitem__(key)
-
-    def __and__(self, other):
-        return self.__qs.__and__(other)
-
-    def __or__(self, other):
-        return self.__qs.__or__(other)
-
-
-class SearchQuerySet(object):
-    # TODO: filter
-
-    def __init__(self, query, schema, limit, page):
-        """
-        Basic initial
-
-        :param query: search query
-        :type query: string
-
-        :param schema: search schema
-        :type schema: subclass of SearchSchemaBase
-
-        :param limit: number of items of one page
-        :type limit: positive int
-
-        :param page: page number
-        :type page: positive int
-        """
-        self.__query = query
-        self.__schema = schema
-        self._cache = None
-        self.__size = int(limit)
-        self.__from = (int(page)-1) * self.__size
-        # query options such as limit, page, sort, etc...
-        self.opts = {
-            'count': 0
-        }
-
-    #####################
-    #  PRIVATE METHODS  #
-    #####################
-
-    def __clone(self):
-        obj = self.__class__(self.__query, self.__schema)
-        obj.opts = self.opts.copy()
-        return obj
-
-    def __get_query(self):
-        p = {
-            'query': {
-                'query_string': {
-                    'query': self.query
-                }, 
-                'analyze_wildcard': True,
-                '_source': False
-            }
-        }
-        if self.opts.get('sort', False):
-            p['sort'] = []
-            for field_name in self.opts.['sort']:
-                desc = False
-                if field_name[0] == '-':
-                    desc = True
-                    field_name = field_name[1:]
-                if field_name == '_score':
-                    desc = not desc
-                if field_name != '_score':
-                    field = self.schema.get_field(field_name)
-                    if field is not None:
-                        field_name = field.sort_mapping(field_name)
-                    else:
-                        field_name = None
-                if field_name is not None:
-                    p['sort'] += [{field_name: {'order': desc and 'desc' else 'asc'}}]
-        return p
-
-    def __get_host(self):
-        return self.__schema.get_host()
-
-    def __get_index(self):
-        return self.__schema.get_index()
-
-    def __get_type(self):
-        return self.__schema.get_type()
-
-    def __get_url(self):
-        ptrn = (self.__get_host(), self.__get_index(), self.__get_type(), self.__size, self.__from)
-        return u'http://%s/%s/%s/_search?size=%d,from=%d' % ptrn
-
-    def __fill_cache(self):
-        url = self.__get_url()
-        query = cls.__get_query()
-        response = requests.post(url, data=json.dumps(query))
-        jsn = response.json()
-        self.opts['count'] = jsn['hits']['total']
-        hits = jsn["hits"]["hits"]
-        self.opts['score'] = {hit['_id']: hit['_score'] for hit in hits}
-        self._cache = self.__schema.model.objects.filter(pk__in=self.opts['score'].keys())
-        if self.opts.get('sort', False):
-            self._cache = self._cache.order_by(self.opts.['sort'])
-
-    ###################
-    #  CHAIN METHODS  #
-    ###################
-
-    def order_by(self, *args):
-        # TODO: multifields sort with _score
-        """
-        Works like Django order_by. Allow to pass _score, but only as single parameter.
-        """
-        if self._cache is not None:
-            obj = self.__clone()
-            obj.opts.['sort'] = args
-            obj._cache = self._cache.order_by(*args)
-            return obj
-        self.opts.['sort'] = args
-        return self
-
-    ####################
-    #  LIST EMULATION  #
-    ####################
-
-    def __repr__(self):
-        if self.__cache is None:
-            self.__fill_cache()
-        # data = list(self[:REPR_OUTPUT_SIZE + 1])
-        # if len(data) > REPR_OUTPUT_SIZE:
-        #     data[-1] = "...(remaining elements truncated)..."
-        # return repr(data)
-
-    def __len__(self):
-        return self.opts['count']
-
-
 class QueryStringMixin(object):
     # TODO: provide query_sting with several types and indices
     @classmethod
-    def get_query_pattern(cls, query, sort=None):
-        p = {
-            'query': {
-                'query_string': {
-                    'query': query
-                }, 
-                'analyze_wildcard': True,
-                '_source': False
-            }
-        }
-        if sort is not None:
-            if sort[0] == '-':
-                p['sort'] = {
-                    sort[1:]: {
-                        'order': 'desc'
-                    }
-                }
-            else:
-                p['sort'] = {
-                    sort: {
-                        'order': 'asc'
-                    }
-                }
-        return p
-
-    @classmethod
-    def search(cls, query, size=10, page=1, order=None):
-        """
-        Search in index
-
-        :param size: how many results should be returned, defaults to 10
-        :type size: int starts by 1
-
-        :param page: page number
-        :type page: int starts by 1
-
-        :param order: field of schema and model for witch you want to order, defaults to None
-        :type order: string
-
-        :rtype: list if parameter order set to 'score'('-score'), but SearchQuerySet if 
-            parameter order set to None or some schema field name
-
-        .. note::
-            - If you set order parameter to None, first size of items will be highest score,
-            becouse score desc is default ordering for index search
-
-        .. note::
-            - You can pass order parameter with minus as first character, in Django style
-            and expect reverse ordering (DESC)
-
-        .. note::
-            - You have to specify fields in SearchSchema, for witch you want to order, otherwise
-            first 10 items will be ordered by score, not by field you want to.
-        """
-        url = u'http://%s/%s/%s/_search' % (cls.get_host(), cls.get_index(), cls.get_type())
-        url += '?size=%d,from=%d' % (size, (page-1)*size)
-        data = cls.get_query_pattern(query, order)
-        response = requests.post(url, data=json.dumps(data))
-        return SearchQuerySetOld.instance(response, cls.model, order)
+    def search(cls, query):
+        return SearchQuerySet(query, cls)
 
 
 class SearchSchema(SearchSchemaBase, QueryStringMixin):
