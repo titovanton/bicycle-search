@@ -105,12 +105,15 @@ class SearchQuerySet(object):
             p['sort'] = []
             for field_name in self.opts['sort']:
                 desc = False
-                if field_name[0] == '-':
-                    desc = True
-                    field_name = field_name[1:]
+                try:
+                    if field_name[0] == '-':
+                        desc = True
+                        field_name = field_name[1:]
+                except IndexError:
+                    field_name = None
                 if field_name == '_score':
                     desc = not desc
-                if field_name != '_score':
+                if field_name != '_score' and field_name is not None:
                     field = self.__schema.get_field(field_name)
                     if field is not None:
                         field_name = field.sort_mapping(field_name)
@@ -132,11 +135,15 @@ class SearchQuerySet(object):
         self.__count = int(jsn['hits']['total'])
         self.opts['score'] = {hit['_id']: hit['_score'] for hit in hits}
         self.__cache = self.__schema.model.objects.filter(pk__in=self.opts['score'].keys())
-        if self.opts.get('sort', False):
-            if '_score' not in self.opts['sort'] and '-_score' not in self.opts['sort']:
-                self.__cache = self.__cache.order_by(*self.opts['sort'])
-            else:
-                self.__scored()
+        sort = self.opts.get('sort', [])
+        if sort and '_score' not in sort and '-_score' not in sort:
+            self.__cache = self.__cache.order_by(*sort)
+        else:
+            self.__cache = self.__scored()
+
+    def __scored(self):
+        return sorted(chain(self.__cache), reverse=True, 
+                      key=lambda obj: self.opts['score'][str(obj.pk)])
 
     def __clone(self):
         obj = self.__class__(self.__query, self.__schema)
