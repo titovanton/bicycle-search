@@ -126,7 +126,7 @@ class SearchQuerySet(object):
         query = self.__get_query()
         response = requests.post(url, data=json.dumps(query))
         jsn = response.json()
-        if jsn['status'] == 404:
+        if jsn.get('status', 200) == 404:
             raise SearchException(jsn['error'])
         hits = jsn["hits"]["hits"]
         self.__count = int(jsn['hits']['total'])
@@ -152,7 +152,7 @@ class SearchQuerySet(object):
         query = self.__get_query(True)
         response = requests.post(url, data=json.dumps(query))
         jsn = response.json()
-        if jsn['status'] == 404:
+        if jsn.get('status', 200) == 404:
             raise SearchException(jsn['error'])
         return int(jsn['count'])
 
