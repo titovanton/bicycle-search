@@ -12,6 +12,18 @@ curl -XGET 'http://localhost:9200/allmarts/mainapp_product/_search?pretty' -d '
     }
 }'
 
+curl -XGET 'http://localhost:9200/allmarts/mainapp_product/_search?pretty' -d '
+{
+    "fields" : ["title"],
+    "query": {
+        "query_string": {
+            "query": "Ноутбук HP Pavilion g6-2313sia"
+        },
+        "analyze_wildcard": true
+    }
+}'
+
+
 
 curl -XGET 'http://localhost:9200/allmarts/mainapp_product/_search?pretty' -d '
 {
