@@ -49,97 +49,8 @@ INDEX_PATTERN = {
 }
 
 
-class SearchQuerySetOld(object):
-    """
-    Works like a Django query_set
-    """
-    @classmethod
-    def instance(cls, response, model, order):
-        """
-        Get instance SearchQuerySet from response object and model class object
-        """
-        hits = response.json()["hits"]["hits"]
-        assert False
-        ids = {hit['_id']: hit['_score'] for hit in hits}
-        qs = model.objects.filter(pk__in=ids.keys())
-        return cls(ids, qs)
-
-    def __init__(self, ids, qs):
-        self.__ids = ids
-        self.__qs = qs
-
-    def scored(self, asc=False):
-        """
-        return list of qs objects sorted by score from highest to lowest
-
-        :param asc: from lowest to highest, defaults to False
-        :type asc: bool
-        """
-        reverse = not asc
-        object_list = sorted(chain(self.__qs), reverse=reverse,
-                             key=lambda obj: self.__ids[str(obj.pk)])
-        return object_list
-
-    class __MethodWrapper(object):
-
-        def __init__(self, name, qs, ids, klass):
-            methods = dict(inspect.getmembers(qs.__class__, inspect.ismethod))
-            if name in methods:
-                self.__method = methods[name]
-                self.__qs = qs
-                self.__ids = ids
-                self.__klass = klass
-            else:
-                msg = '%s has not %s method' % (qs.__class__, name)
-                raise AttributeError(msg)
-
-        def __call__(self, *args, **kwargs):
-            qs = self.__method(self.__qs, *args, **kwargs)
-            return self.__klass(self.__ids, qs)
-
-    def __getattribute__(self, name):
-        # hardcode
-        # unfortunately a special methods like __len__ cannot be reloaded like bellow
-        # this is a python speed price
-        query_set_attrs = ('all', 'filter', 'exclude', 'order_by', 'distinct', 'aggregate',
-                           'annotate', 'extra',)
-        if name in query_set_attrs:
-            return self.__MethodWrapper(name, self.__qs, self.__ids, self.__class__)
-        else:
-            return super(SearchQuerySet, self).__getattribute__(name)
-
-    def __deepcopy__(self, memo):
-        return self.__qs.__deepcopy__(memo)
-
-    def __getstate__(self):
-        return self.__qs.__getstate__()
-
-    def __setstate__(self, state):
-        return self.__qs.__setstate__(state)
-
-    def __reduce__(self):
-        return self.__qs.__reduce__()
-
-    def __repr__(self):
-        return self.__qs.__repr__()
-
-    def __len__(self):
-        return self.__qs.__len__()
-
-    def __iter__(self):
-        return self.__qs.__iter__()
-
-    def __nonzero__(self):
-        return self.__qs.__nonzero__()
-
-    def __getitem__(self, key):
-        return self.__qs.__getitem__(key)
-
-    def __and__(self, other):
-        return self.__qs.__and__(other)
-
-    def __or__(self, other):
-        return self.__qs.__or__(other)
+class SearchException(Exception):
+    pass
 
 
 class SearchQuerySet(object):
@@ -215,6 +126,8 @@ class SearchQuerySet(object):
         query = self.__get_query()
         response = requests.post(url, data=json.dumps(query))
         jsn = response.json()
+        if jsn['status'] == 404:
+            raise SearchException(jsn['error'])
         hits = jsn["hits"]["hits"]
         self.__count = int(jsn['hits']['total'])
         self.opts['score'] = {hit['_id']: hit['_score'] for hit in hits}
@@ -239,6 +152,8 @@ class SearchQuerySet(object):
         query = self.__get_query(True)
         response = requests.post(url, data=json.dumps(query))
         jsn = response.json()
+        if jsn['status'] == 404:
+            raise SearchException(jsn['error'])
         return int(jsn['count'])
 
     def __get_host(self):
