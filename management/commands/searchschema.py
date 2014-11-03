@@ -8,7 +8,7 @@ from django.db.models import get_models
 from django.conf import settings
 from django.core.management.base import BaseCommand
 from django.core.management.base import CommandError
-from bicycle.search2 import SearchSchema
+from bicycle.search2.schema import SearchSchema
 
 
 def isschema(value):
