@@ -25,7 +25,7 @@ class StringField(BaseField):
     def __init__(self, **kwargs):
         super(StringField, self).__init__(**kwargs)
         self.data['fields'] = {
-            "raw": { 
+            "raw": {
                 "type":  "string",
                 "index": "not_analyzed"
             }

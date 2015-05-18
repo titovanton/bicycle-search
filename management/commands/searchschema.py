@@ -16,11 +16,12 @@ def isschema(value):
 
 
 class Command(BaseCommand):
+
     def handle(self, *args, **options):
         not_found = []
         for app_label in settings.INSTALLED_APPS:
             try:
-                module = importlib.import_module(app_label+'.search_schema')
+                module = importlib.import_module(app_label + '.search_schema')
                 members = dict(inspect.getmembers(module, isschema)).values()
                 schemas = [v for v in members if inspect.getmodule(v) is module]
                 if schemas:

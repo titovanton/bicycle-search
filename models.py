@@ -11,7 +11,7 @@ from django.db.models.signals import pre_delete
 
 
 class SearchableModelMixin(object):
-    
+
     @classmethod
     def get_bulk_qs(cls):
         return cls.objects.all()
@@ -26,6 +26,7 @@ class SearchableModelMixin(object):
 
 
 class SearchablePublishedMixin(SearchableModelMixin):
+
     @classmethod
     def get_bulk_qs(cls):
         return cls.objects.published()
@@ -42,9 +43,9 @@ class SearchablePublishedMixin(SearchableModelMixin):
 
 def search_trigger(name):
     module = sys.modules[name]
-    gen = (tupl[1] for tupl in inspect.getmembers(module) 
+    gen = (tupl[1] for tupl in inspect.getmembers(module)
            if inspect.isclass(tupl[1]) and issubclass(tupl[1], Model)
-              and issubclass(tupl[1], SearchableModelMixin))
+           and issubclass(tupl[1], SearchableModelMixin))
     for cls in gen:
         post_save.connect(cls.post_save_handler, sender=cls)
         pre_delete.connect(cls.pre_delete_handler, sender=cls)
