@@ -33,7 +33,7 @@ class SearchablePublishedMixin(SearchableModelMixin):
 
     @classmethod
     def post_save_handler(cls, instance, **kwargs):
-        print instance
+
         if instance.published:
             cls.SearchSchema.put(instance)
         else:

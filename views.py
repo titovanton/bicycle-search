@@ -14,6 +14,7 @@ class SearchView(ListView):
 
     def get_queryset(self):
         form = self.search_form(self.request.GET)
+
         if form.is_valid():
             self.query = form.cleaned_data['q']
             return self.schema.search(self.query)
@@ -26,4 +27,5 @@ class SearchView(ListView):
             'search_query': self.query,
             # 'result_objects': context['object_list'],
         })
+
         return context
