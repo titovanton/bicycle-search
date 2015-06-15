@@ -14,6 +14,7 @@ class SearchException(Exception):
 
 class SearchQuerySet(object):
     # TODO: filter
+
     """
     Search query set in Django style
     """
@@ -32,6 +33,8 @@ class SearchQuerySet(object):
         self.__query = query
         self.__schema = schema
         self.__cache = None
+        self.__defer = None
+
         # query options such as limit, page, sort, etc...
         self.opts = {}
 
@@ -55,31 +58,39 @@ class SearchQuerySet(object):
             'query': {
                 'query_string': {
                     'query': self.__query
-                }, 
+                },
                 'analyze_wildcard': True,
                 '_source': False
             }
         }
+
         if self.opts.get('sort', False) and not count:
             p['sort'] = []
+
             for field_name in self.opts['sort']:
                 desc = False
+
                 try:
                     if field_name[0] == '-':
                         desc = True
                         field_name = field_name[1:]
                 except IndexError:
                     field_name = None
+
                 if field_name == '_score':
                     desc = not desc
+
                 if field_name != '_score' and field_name is not None:
                     field = self.__schema.get_field(field_name)
+
                     if field is not None:
                         field_name = field.sort_mapping(field_name)
                     else:
                         field_name = None
+
                 if field_name is not None:
                     p['sort'] += [{field_name: desc and 'desc' or 'asc'}]
+
         return p
 
     # depends on opts
@@ -88,38 +99,50 @@ class SearchQuerySet(object):
         query = self.__get_query()
         response = requests.post(url, data=json.dumps(query))
         jsn = response.json()
+
         if jsn.get('status', 200) == 404:
             raise SearchException(jsn['error'])
+
         hits = jsn["hits"]["hits"]
         self.__count = int(jsn['hits']['total'])
         self.opts['score'] = {hit['_id']: hit['_score'] for hit in hits}
         self.__cache = self.__schema.get_model().objects.filter(pk__in=self.opts['score'].keys())
         sort = self.opts.get('sort', [])
+
         if sort and '_score' not in sort and '-_score' not in sort:
             self.__cache = self.__cache.order_by(*sort)
-        else:
+
+        if self.__defer is not None:
+            self.__cache = self.__cache.defer(*self.__defer)
+
+        if not sort or '_score' in sort or '-_score' in sort:
             self.__cache = self.__scored()
 
     def __scored(self):
-        return sorted(chain(self.__cache), reverse=True, 
+        return sorted(chain(self.__cache), reverse=True,
                       key=lambda obj: self.opts['score'][str(obj.pk)])
 
     def __clone(self):
         obj = self.__class__(self.__query, self.__schema)
         obj.opts = self.opts.copy()
+
         return obj
 
     # depends on opts
     def __len(self):
+
         if self.opts.get('slice', False):
             return self.__get_size()
+
         ptrn = (self.__get_host(), self.__get_index(), self.__get_type())
         url = u'http://%s/%s/%s/_count' % ptrn
         query = self.__get_query(True)
         response = requests.post(url, data=json.dumps(query))
         jsn = response.json()
+
         if jsn.get('status', 200) == 404:
             raise SearchException(jsn['error'])
+
         return int(jsn['count'])
 
     def __get_host(self):
@@ -132,22 +155,26 @@ class SearchQuerySet(object):
         return self.__schema.get_type()
 
     def __get_from(self):
+
         if self.opts.get('slice', False):
             return self.opts['slice'].start
         else:
             return 0
 
     def __get_size(self):
+
         if self.opts.get('slice', False):
             start = self.__get_from()
             stop = self.opts['slice'].stop
+
             return stop - start
         else:
             return self.__len__()
 
     def __get_url(self):
-        ptrn = (self.__get_host(), self.__get_index(), self.__get_type(), 
+        ptrn = (self.__get_host(), self.__get_index(), self.__get_type(),
                 self.__get_size(), self.__get_from())
+
         return u'http://%s/%s/%s/_search?size=%d&from=%d' % ptrn
 
     ###################
@@ -163,15 +190,27 @@ class SearchQuerySet(object):
         :param args: schema(model) ordered fields
         :type args: unpacked list of unnamed strings
 
-
         - You can pass order parameter with minus as first character, in Django style
         and expect reverse ordering (DESC)
         - You have to specify fields in SearchSchema, for witch you want to order, otherwise
-        first 10 items(default size of search result) will be ordered by score, not by field 
+        first 10 items(default size of search result) will be ordered by score, not by field
         you want to.
         """
         obj = self.__clone()
         obj.opts['sort'] = args
+
+        return obj
+
+    def defer(self, *args):
+        """
+        Works like Django defer.
+
+        :param args: model fields
+        :type args: unpacked list of unnamed strings
+        """
+        obj = self.__clone()
+        obj.__defer = args
+
         return obj
 
     ####################
@@ -179,6 +218,7 @@ class SearchQuerySet(object):
     ####################
 
     def __repr__(self):
+
         if self.__cache is None:
             return u'<%sSearchQuerySet: [%d uncached item(s)]>' % (
                 self.__schema.get_model().__name__, self.__len__())
@@ -186,8 +226,10 @@ class SearchQuerySet(object):
             return repr(self.__cache)
 
     def __len__(self):
+
         if self.__count is None:
             self.__count = self.__len()
+
         return self.__count
 
     def __getitem__(self, k):
@@ -195,38 +237,51 @@ class SearchQuerySet(object):
         """
         Retrieves an item or slice from the set of results.
         """
+
         if not isinstance(k, (slice,) + six.integer_types):
             raise TypeError
+
         assert ((not isinstance(k, slice) and (k >= 0)) or
                 (isinstance(k, slice) and (k.start is None or k.start >= 0) and
                  (k.stop is None or k.stop >= 0))), \
             "Negative indexing is not supported."
+
         if isinstance(k, slice):
             obj = self.__clone()
+
             if k.start is not None:
                 start = int(k.start)
             else:
                 start = 0
+
             if k.step is not None:
                 step = int(k.step)
             else:
                 step = 1
+
             if k.stop is not None:
                 stop = int(k.stop)
             else:
                 stop = self.__len__()
+
             if start > self.__len__() or stop > self.__len__():
                 raise IndexError('slice out of list range')
             obj.opts['slice'] = slice(start, stop, step)
+
             return obj
         else:
+
             if k > self.__len__():
                 raise IndexError('list index out of range')
+
             if self.__cache is None:
                 self.__fill_cache()
+
             return self.__cache[k]
 
     def __iter__(self):
+
         if self.__cache is None:
             self.__fill_cache()
+
         return iter(self.__cache)

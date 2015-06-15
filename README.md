@@ -1,7 +1,5 @@
 # Full text search based on ElasticSearch
 
-## Configure
-
 ### Settings
 
     # settings.py
@@ -74,5 +72,7 @@ than read any descriptions.
 
 ### Raw usage
 
-Each schema has search method, which get query(string) as a single parametr and return a queryset
+Each schema has a search method, which get query(string) as a single parametr and return a queryset
 of a model wich specified as model attribute.
+
+    ProductSchema.search('foo')
